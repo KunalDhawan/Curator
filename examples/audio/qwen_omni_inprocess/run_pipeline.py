@@ -71,6 +71,8 @@ from nemo_curator.stages.audio.inference.qwen_omni import InferenceQwenOmniStage
 from nemo_curator.stages.audio.io.nemo_tarred_reader import NemoTarredAudioReader
 from nemo_curator.stages.audio.text_filtering import (
     AbbreviationConcatStage,
+    ContextualASRExtractionStage,
+    ContextualASRPromptVariantStage,
     DisfluencyWerGuardStage,
     FastTextLIDStage,
     InitializeFieldsStage,
@@ -193,6 +195,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:  # noqa: PLR0915
     itn.add_argument("--itn_gpu_memory_utilization", type=float, default=0.95,
                      help="Fraction of GPU memory for ITN vLLM engine.")
     itn.add_argument("--itn_no_validation", action="store_true", help="Disable ITN output validation.")
+
+    ctx = ap.add_argument_group("Contextual ASR (entity extraction + prompt variants)")
+    ctx.add_argument("--enable_context_asr", action="store_true",
+                     help="Enable contextual ASR entity extraction and prompt variant stages.")
+    ctx.add_argument("--context_asr_model_id", type=str, default="Qwen/Qwen3.5-35B-A3B-FP8",
+                     help="Model for contextual ASR entity extraction.")
+    ctx.add_argument("--context_asr_prompt_file", type=str, default=None,
+                     help="Prompt file for entity extraction. Uses bundled default if not set.")
+    ctx.add_argument("--context_asr_text_key", type=str, default=None,
+                     help="Input key for context ASR (default: pnc_text if PnC enabled, abbreviated_text otherwise).")
+    ctx.add_argument("--context_asr_batch_size", type=int, default=64,
+                     help="Batch size for context ASR extraction.")
+    ctx.add_argument("--context_asr_tensor_parallel_size", type=int, default=None,
+                     help="TP size for context ASR model (None = auto-detect).")
+    ctx.add_argument("--context_asr_max_output_tokens", type=int, default=2048,
+                     help="Max tokens to generate per context ASR sample.")
+    ctx.add_argument("--context_asr_max_model_len", type=int, default=8192,
+                     help="Max context length for context ASR vLLM engine.")
+    ctx.add_argument("--context_asr_max_num_seqs", type=int, default=16,
+                     help="Max concurrent sequences for context ASR vLLM engine.")
+    ctx.add_argument("--context_asr_gpu_memory_utilization", type=float, default=0.95,
+                     help="Fraction of GPU memory for context ASR vLLM engine.")
+    ctx.add_argument("--context_asr_seed", type=int, default=42,
+                     help="Base RNG seed for prompt variant generation.")
+    ctx.add_argument("--context_asr_partial_keep_lo", type=float, default=0.5,
+                     help="Lower bound of random keep fraction for partial-context variant.")
+    ctx.add_argument("--context_asr_partial_keep_hi", type=float, default=0.8,
+                     help="Upper bound of random keep fraction for partial-context variant.")
 
     asr = ap.add_argument_group("QwenASR hallucination recovery")
     asr.add_argument("--asr_model_id", type=str, default=None,
@@ -368,6 +398,27 @@ def main() -> None:  # noqa: C901
             batch_size=args.itn_batch_size,
             enable_validation=not args.itn_no_validation,
         ))
+
+    if args.enable_context_asr:
+        context_text_key = args.context_asr_text_key or ("pnc_text" if not args.skip_pnc else "abbreviated_text")
+        stages.extend([
+            ContextualASRExtractionStage(
+                model_id=args.context_asr_model_id,
+                prompt_file=args.context_asr_prompt_file,
+                text_key=context_text_key,
+                tensor_parallel_size=args.context_asr_tensor_parallel_size,
+                max_output_tokens=args.context_asr_max_output_tokens,
+                max_model_len=args.context_asr_max_model_len,
+                max_num_seqs=args.context_asr_max_num_seqs,
+                gpu_memory_utilization=args.context_asr_gpu_memory_utilization,
+                batch_size=args.context_asr_batch_size,
+            ),
+            ContextualASRPromptVariantStage(
+                seed=args.context_asr_seed,
+                partial_keep_lo=args.context_asr_partial_keep_lo,
+                partial_keep_hi=args.context_asr_partial_keep_hi,
+            ),
+        ])
 
     stages.append(ShardedManifestWriterStage(output_dir=args.output_dir))
 
